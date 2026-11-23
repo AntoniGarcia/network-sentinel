@@ -1,0 +1,5 @@
+pyshark>=0.6,<0.7
+psutil>=5.9
+streamlit>=1.49
+plotly>=5.19
+pandas>=2.0
