@@ -158,7 +158,7 @@ class BandwidthMonitor:
     @staticmethod
     def _get_local_ips():
         return {addr.address.split("%")[0] for addrs in psutil.net_if_addrs().values()
-                for addr in addrs if addr.family == socket.AF_INET}
+                for addr in addrs if addr.family in (socket.AF_INET, socket.AF_INET6)}
 
     def _set_status(self, **kwargs):
         with self._lock:
@@ -292,7 +292,7 @@ class BandwidthMonitor:
             capture = None
             try:
                 capture = ManagedLiveCapture(interface=self.interface,
-                    bpf_filter="ip and port 53" if dns_only else "ip or arp",
+                    bpf_filter="(ip or ip6) and port 53" if dns_only else "ip or ip6 or arp",
                     tshark_path=self._path, eventloop=loop)
                 def callback(packet):
                     if self._stop.is_set():
@@ -303,7 +303,7 @@ class BandwidthMonitor:
                         else:
                             self._handle_packet(packet)
                             with self._lock:
-                                self._status["packets_captured"] += int(hasattr(packet, "ip"))
+                                self._status["packets_captured"] += int(hasattr(packet, "ip") or hasattr(packet, "ipv6"))
                                 self._status.update(last_packet=time.time(), state="Capturando")
                     except (AttributeError, ValueError, TypeError, IndexError):
                         logger.debug("Paquete incompleto", exc_info=True)
@@ -359,15 +359,16 @@ class BandwidthMonitor:
         if hasattr(packet, "arp"):
             self.security.observe_device(str(getattr(packet.arp, "src_proto_ipv4", "")),
                 str(getattr(packet.arp, "src_hw_mac", "")), "ARP observado")
-        if not hasattr(packet, "ip"):
+        ip_layer = getattr(packet, "ip", None) or getattr(packet, "ipv6", None)
+        if ip_layer is None:
             return
         proto = "tcp" if hasattr(packet, "tcp") else "udp" if hasattr(packet, "udp") else "ip"
         transport = getattr(packet, proto)
         src_port, dst_port = int(getattr(transport, "srcport", 0)), int(getattr(transport, "dstport", 0))
-        self.security.observe_packet(packet.ip.src, packet.ip.dst, src_port, dst_port, proto, int(packet.length),
+        self.security.observe_packet(ip_layer.src, ip_layer.dst, src_port, dst_port, proto, int(packet.length),
             syn=str(getattr(transport, "flags_syn", "0")) == "1",
             ack=str(getattr(transport, "flags_ack", "0")) == "1")
-        self._classify_and_record(packet.ip.src, packet.ip.dst, src_port, dst_port, proto, int(packet.length))
+        self._classify_and_record(ip_layer.src, ip_layer.dst, src_port, dst_port, proto, int(packet.length))
 
     def _classify_and_record(self, src_ip, dst_ip, src_port, dst_port, proto, length):
         now = time.monotonic()
@@ -388,7 +389,8 @@ class BandwidthMonitor:
             dns = self._dns_map.get(remote_ip)
             if app is None and dns and dns[1] > now:
                 app = dns[0]
-            app = app or (_port_label(remote_port) if proto != "ip" else "IPv4 (sin puertos)")
+            fallback = "IPv6 (sin puertos)" if ":" in local_ip else "IPv4 (sin puertos)"
+            app = app or (_port_label(remote_port) if proto != "ip" else fallback)
             if app not in self._traffic and len(self._traffic) >= self.MAX_APPS - 1:
                 app = "Otros (límite de aplicaciones)"
             entry = self._traffic.setdefault(app, dict(totals=[0, 0], buckets=deque(), flows=OrderedDict()))
@@ -423,9 +425,10 @@ class BandwidthMonitor:
             return
         dns = packet.dns
         domain = getattr(dns, "qry_name", None)
-        if domain and hasattr(packet, "ip"):
+        ip_layer = getattr(packet, "ip", None) or getattr(packet, "ipv6", None)
+        if domain and ip_layer is not None:
             response = str(getattr(dns, "flags_response", "0")) == "1"
-            self.security.observe_dns(packet.ip.dst if response else packet.ip.src, domain, response)
+            self.security.observe_dns(ip_layer.dst if response else ip_layer.src, domain, response)
         with self._lock:
             self._status["dns_packets_captured"] += 1
         if str(getattr(dns, "flags_response", "0")) != "1":
@@ -440,15 +443,16 @@ class BandwidthMonitor:
             return
         now = time.monotonic()
         with self._lock:
-            for value in self._field_values(dns, "a"):
-                try:
-                    ip = str(ipaddress.IPv4Address(value))
-                except ipaddress.AddressValueError:
-                    continue
-                self._dns_map[ip] = (name, now + min(ttl, 86400))
-                self._dns_map.move_to_end(ip)
-                while len(self._dns_map) > self.MAX_DNS:
-                    self._dns_map.popitem(last=False)
+            for field_name, addr_cls in (("a", ipaddress.IPv4Address), ("aaaa", ipaddress.IPv6Address)):
+                for value in self._field_values(dns, field_name):
+                    try:
+                        ip = str(addr_cls(value))
+                    except ipaddress.AddressValueError:
+                        continue
+                    self._dns_map[ip] = (name, now + min(ttl, 86400))
+                    self._dns_map.move_to_end(ip)
+                    while len(self._dns_map) > self.MAX_DNS:
+                        self._dns_map.popitem(last=False)
 
     def _refresh_proc_map(self):
         try:

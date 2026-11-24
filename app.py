@@ -319,7 +319,7 @@ def render_live_dashboard(monitor, threshold):
     with st.container(horizontal=True, vertical_alignment="center"):
         st.badge(status["state"], icon=":material/radio_button_checked:", color="green")
         st.caption(
-            f"Paquetes IPv4: {status['packets_captured']:,} · "
+            f"Paquetes IP: {status['packets_captured']:,} · "
             f"Paquetes DNS: {status['dns_packets_captured']:,} · "
             f"Interfaz: `{status.get('interface') or 'auto'}`"
         )
@@ -445,7 +445,7 @@ def main():
         render_security(monitor)
     with bandwidth_tab:
         st.caption(
-            "IPv4 · ventana móvil de 5 segundos · flujos recientes y alertas combinadas de subida y descarga."
+            "IPv4 / IPv6 · ventana móvil de 5 segundos · flujos recientes y alertas combinadas de subida y descarga."
         )
         if not st.session_state.capturing:
             status = monitor.get_status()

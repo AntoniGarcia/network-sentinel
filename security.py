@@ -78,27 +78,30 @@ class NetworkSecurity:
         self._dedup = OrderedDict()
         self._syn = OrderedDict()
         self._networks = [ipaddress.ip_network(row['network']) for row in local_networks()]
-        self._own = {addr.address for addrs in psutil.net_if_addrs().values() for addr in addrs if addr.family == socket.AF_INET}
+        self._own = {addr.address.split('%')[0] for addrs in psutil.net_if_addrs().values()
+                     for addr in addrs if addr.family in (socket.AF_INET, socket.AF_INET6)}
         self._job = None
         self._cancel = threading.Event()
         self.job_status = dict(running=False, message='Sin tareas activas', progress=0, total=0, error=None)
         self.port_results = []
-        self.audit_reports = OrderedDict()
+        self.audit_reports = OrderedDict(
+            (report['ip'], report) for report in self.registry.list_audits()
+        )
 
     def refresh_context(self):
         """Actualizar adaptadores antes de acciones, sin depender de la LAN al abrir la app."""
         networks = [ipaddress.ip_network(row['network']) for row in local_networks()]
-        own = {addr.address for addrs in psutil.net_if_addrs().values()
-               for addr in addrs if addr.family == socket.AF_INET}
+        own = {addr.address.split('%')[0] for addrs in psutil.net_if_addrs().values()
+               for addr in addrs if addr.family in (socket.AF_INET, socket.AF_INET6)}
         with self.lock:
             self._networks, self._own = networks, own
             for row in self.devices.values():
                 row['Tipo'] = 'Este equipo' if row['IP'] in own else 'LAN' if self.is_lan(row['IP']) else 'Externo'
 
     def _metadata(self, row):
-        address = ipaddress.IPv4Address(row['IP'])
+        address = ipaddress.ip_address(row['IP'])
         network = next((net for net in sorted(self._networks, key=lambda net: -net.prefixlen)
-                        if address in net), None)
+                        if net.version == address.version and address in net), None)
         record = self.registry.get(str(network), row['IP'], row['MAC']) if network else None
         return dict(Nombre=record['name'] if record else '', Notas=record['notes'] if record else '',
                     Reconocido=bool(record and record['recognized']), Subred=str(network) if network else '',
@@ -130,6 +133,10 @@ class NetworkSecurity:
     def is_lan(self, ip):
         try:
             address = ipaddress.ip_address(ip)
+            if address.version == 6:
+                return not address.is_multicast and not address.is_unspecified and (
+                    address.is_link_local or (address.is_private and not address.is_loopback)
+                )
             return any(address in net for net in self._networks)
         except ValueError:
             return False
@@ -148,11 +155,14 @@ class NetworkSecurity:
 
     def observe_device(self, ip, mac='', source='Tráfico IPv4', confirmed=True):
         try:
-            address = ipaddress.IPv4Address(ip)
+            address = ipaddress.ip_address(str(ip).split('%')[0])
         except ValueError:
             return
-        if address.is_multicast or address.is_unspecified or any(address == net.broadcast_address for net in self._networks):
+        if address.is_multicast or address.is_unspecified or (
+            address.version == 4 and any(address == net.broadcast_address for net in self._networks)
+        ):
             return
+        ip = str(address)
         with self.lock:
             new = ip not in self.devices
             if new:
@@ -182,9 +192,10 @@ class NetworkSecurity:
     def observe_packet(self, src, dst, sport, dport, proto, length, syn=False, ack=False):
         now = time.monotonic()
         with self.lock:
-            self.observe_device(src)
+            self.observe_device(src, source='Tráfico IPv6' if ':' in str(src) else 'Tráfico IPv4')
             if dst != src:
-                self.observe_device(dst, source='Destino IPv4 (sin confirmar)', confirmed=False)
+                dst_src = 'Destino IPv6 (sin confirmar)' if ':' in str(dst) else 'Destino IPv4 (sin confirmar)'
+                self.observe_device(dst, source=dst_src, confirmed=False)
             for ip in {src, dst}:
                 if ip in self.devices:
                     self.devices[ip]['Bytes'] += length
@@ -364,6 +375,7 @@ class NetworkSecurity:
                 self.audit_reports.move_to_end(ip)
                 while len(self.audit_reports) > 16:
                     self.audit_reports.popitem(last=False)
+                self.registry.save_audit(result)
         return self._launch(check, len(AUDIT_PORTS))
 
     def update_finding(self, ip, finding_id, state, note=''):
@@ -373,5 +385,6 @@ class NetworkSecurity:
             for row in self.audit_reports.get(ip, {}).get('findings', []):
                 if row['ID'] == finding_id:
                     row.update(Gestion=state, Nota=note.strip())
+                    self.registry.save_audit(self.audit_reports[ip])
                     return True
             return False

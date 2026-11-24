@@ -110,8 +110,6 @@ def network_figure(rows, devices):
     }
     for kind, color in colors.items():
         ips = [ip for ip in positions if kinds.get(ip, "Externo") == kind]
-        if not ips:
-            continue
         fig.add_trace(
             go.Scatter(
                 x=[positions[ip][0] for ip in ips],

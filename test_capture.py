@@ -118,6 +118,28 @@ class MonitorTests(unittest.TestCase):
         self.assertTrue(self.monitor.reset())
         self.assertTrue(self.monitor.get_dataframe().empty)
 
+    def test_ipv6_packet_and_aaaa_dns_classification(self):
+        self.monitor._local_ips.add("fe80::1")
+        dns = SimpleNamespace(
+            flags_response="1",
+            qry_name="v6.example.org",
+            aaaa=SimpleNamespace(all_fields=["2001:4860:4860::8888"]),
+            resp_ttl=SimpleNamespace(all_fields=["60"]),
+        )
+        self.monitor._handle_dns_packet(SimpleNamespace(dns=dns, ipv6=SimpleNamespace(src="2001:4860:4860::8888", dst="fe80::1")))
+        pkt = SimpleNamespace(
+            length="1500",
+            ipv6=SimpleNamespace(src="2001:4860:4860::8888", dst="fe80::1"),
+            tcp=SimpleNamespace(srcport="443", dstport="52000", flags_syn="0", flags_ack="1"),
+        )
+        self.monitor._handle_packet(pkt)
+        row = self.monitor.get_dataframe().iloc[0]
+        self.assertEqual(row["Aplicación"], "v6.example.org")
+        self.assertEqual(row["Descarga Bytes"], 1500)
+        devices = {d["IP"]: d for d in self.monitor.security.snapshot()["devices"]}
+        self.assertEqual(devices["fe80::1"]["Tipo"], "LAN")
+        self.assertEqual(devices["2001:4860:4860::8888"]["Tipo"], "Externo")
+
 
 if __name__ == "__main__":
     unittest.main()

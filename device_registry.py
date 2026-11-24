@@ -3,7 +3,9 @@
 La base se crea sólo al guardar explícitamente un dispositivo. Las lecturas
 durante la captura usan memoria; las escrituras SQLite son transaccionales.
 """
+import copy
 import ipaddress
+import json
 from pathlib import Path
 import re
 import sqlite3
@@ -22,23 +24,44 @@ def normalize_mac(value):
 
 class DeviceRegistry:
     MAX_RECORDS = 2048
+    MAX_AUDITS = 16
 
     def __init__(self, path=None):
         self.path = Path(path) if path is not None else None
         self.lock = threading.RLock()
         self._records = {}
+        self._audits = {}
         self.error = None
         if self.path and self.path.exists():
             try:
                 with self._connection() as conn:
-                    rows = conn.execute('SELECT network, identity, ip, mac, name, notes, recognized, updated FROM devices LIMIT ?',
-                                        (self.MAX_RECORDS + 1,)).fetchall()
-                if len(rows) > self.MAX_RECORDS:
-                    raise ValueError('La base de dispositivos supera el límite de registros.')
-                for row in rows:
-                    record = dict(row)
-                    self._records[(record['network'], record['identity'])] = record
-            except (OSError, sqlite3.Error, ValueError) as exc:
+                    tables = {
+                        r[0]
+                        for r in conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        ).fetchall()
+                    }
+                    if 'devices' in tables:
+                        rows = conn.execute(
+                            'SELECT network, identity, ip, mac, name, notes, recognized, updated FROM devices LIMIT ?',
+                            (self.MAX_RECORDS + 1,),
+                        ).fetchall()
+                        if len(rows) > self.MAX_RECORDS:
+                            raise ValueError('La base de dispositivos supera el límite de registros.')
+                        for row in rows:
+                            record = dict(row)
+                            self._records[(record['network'], record['identity'])] = record
+                    if 'audits' in tables:
+                        audit_rows = conn.execute(
+                            'SELECT ip, payload FROM audits ORDER BY finished ASC LIMIT ?',
+                            (self.MAX_AUDITS + 1,),
+                        ).fetchall()
+                        for row in audit_rows[-self.MAX_AUDITS:]:
+                            data = json.loads(row['payload'])
+                            if isinstance(data.get('identity'), list):
+                                data['identity'] = tuple(data['identity'])
+                            self._audits[row['ip']] = data
+            except (OSError, sqlite3.Error, ValueError, json.JSONDecodeError) as exc:
                 self.error = f'No se pudo leer el registro de dispositivos: {exc}'
 
     def _connection(self):
@@ -104,3 +127,39 @@ class DeviceRegistry:
                     conn.execute('DELETE FROM devices WHERE network=? AND identity=?', (network, identity))
                     conn.commit()
             return self._records.pop((network, identity), None) is not None
+
+    def list_audits(self):
+        with self.lock:
+            return [copy.deepcopy(row) for row in self._audits.values()]
+
+    def save_audit(self, report):
+        if self.error:
+            raise ValueError(self.error + '. Conserva el archivo y revisa su estado antes de modificarlo.')
+        snapshot = copy.deepcopy(report)
+        ip = str(snapshot['ip'])
+        finished = float(snapshot.get('finished') or snapshot.get('started') or time.time())
+        with self.lock:
+            self._audits.pop(ip, None)
+            self._audits[ip] = snapshot
+            while len(self._audits) > self.MAX_AUDITS:
+                oldest = next(iter(self._audits))
+                self._audits.pop(oldest, None)
+            if self.path:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                with self._connection() as conn:
+                    conn.execute(
+                        '''CREATE TABLE IF NOT EXISTS audits (
+                            ip TEXT PRIMARY KEY,
+                            finished REAL NOT NULL,
+                            payload TEXT NOT NULL)'''
+                    )
+                    conn.execute(
+                        '''INSERT INTO audits VALUES (:ip, :finished, :payload)
+                           ON CONFLICT(ip) DO UPDATE SET finished=excluded.finished, payload=excluded.payload''',
+                        dict(ip=ip, finished=finished, payload=json.dumps(snapshot, ensure_ascii=False)),
+                    )
+                    conn.execute(
+                        'DELETE FROM audits WHERE ip NOT IN (SELECT ip FROM audits ORDER BY finished DESC LIMIT ?)',
+                        (self.MAX_AUDITS,),
+                    )
+                    conn.commit()

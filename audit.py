@@ -134,7 +134,7 @@ def tls_probe(ip, port, hostname=''):
 
 
 def run_audit(ip, hostname='', cancel=None, progress=None, ports=AUDIT_PORTS):
-    ip = str(ipaddress.IPv4Address(ip))
+    ip = str(ipaddress.ip_address(ip))
     hostname = validate_hostname(hostname)
     report = dict(id=uuid.uuid4().hex, ip=ip, hostname=hostname, started=time.time(),
                   finished=None, cancelled=False, checks=[], findings=[], completed_groups=[])

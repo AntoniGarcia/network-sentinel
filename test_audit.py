@@ -140,6 +140,29 @@ class AuditTests(unittest.TestCase):
         self.assertTrue(engine.clear())
         self.assertEqual(engine.snapshot()['audits'],[])
 
+    def test_audit_history_persists_in_sqlite(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / 'devices.sqlite3'
+            engine1 = NetworkSecurity(registry_path=db_path)
+            engine1._networks = [ipaddress.ip_network('192.168.1.0/24')]
+            engine1.observe_device('192.168.1.10')
+            result = run_audit('192.168.1.10', ports=())
+            result['findings'] = [finding('192.168.1.10', 80, 'HTTP', 'Media', 'HEAD /', 'HTTPS', 'http_transport:80')]
+            with patch.object(engine1, 'refresh_context'), patch('security.run_audit', return_value=result):
+                self.assertTrue(engine1.start_audit('192.168.1.10'))
+                engine1._job.join(2)
+            self.assertTrue(engine1.update_finding('192.168.1.10', result['findings'][0]['ID'], 'Mitigado por usuario', 'HTTPS activado'))
+
+            engine2 = NetworkSecurity(registry_path=db_path)
+            audits = engine2.snapshot()['audits']
+            self.assertEqual(len(audits), 1)
+            self.assertEqual(audits[0]['ip'], '192.168.1.10')
+            self.assertEqual(audits[0]['findings'][0]['Gestion'], 'Mitigado por usuario')
+            self.assertEqual(audits[0]['findings'][0]['Nota'], 'HTTPS activado')
+
 
 if __name__ == '__main__':
     unittest.main()
