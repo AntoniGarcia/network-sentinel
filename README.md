@@ -1,9 +1,9 @@
 # Network Sentinel · Bandwidth Monitor
 
-Monitor local de tráfico IPv4 por aplicación con Streamlit, Plotly, PyShark y psutil.
-Muestra subida y descarga, top 5, historial reciente, totales de sesión y alertas.
+Monitor local de tráfico IPv4/IPv6 por aplicación y visibilidad defensiva de red con Streamlit, Plotly, PyShark y psutil.
+Muestra subida y descarga, top 5, historial reciente, totales de sesión, topología de red, alertas y auditoría técnica de hosts.
 
-![Captura de pantalla pendiente](docs/screenshot.png)
+![Network Sentinel · Panel de visibilidad y topología de red](docs/screenshot.png)
 
 ## Panel de seguridad de red
 
@@ -28,7 +28,7 @@ El panel inicial ofrece seis vistas y conserva el monitor por aplicación en otr
   para revisar, con falsos positivos posibles, no veredictos ni un antivirus.
   Se pueden filtrar por estado y marcar como revisadas sin silenciar avisos futuros.
 
-La captura general incluye ARP e IPv4. Los flujos visibles de otros equipos se registran
+La captura general incluye ARP, IPv4 e IPv6. Los flujos visibles de otros equipos se registran
 para seguridad sin sumarlos a la subida/descarga de tu laptop. Se admite seleccionar
 una interfaz conectada a un puerto espejo; esto no configura automáticamente el switch.
 Desde Wi-Fi/Ethernet normal **no se obtiene toda la navegación de los demás equipos**.
@@ -44,7 +44,7 @@ ICMP pueden faltar; una entrada de caché ARP no prueba que un equipo siga conec
 
 Los registros de seguridad se mantienen en RAM: hasta 1024 dispositivos/destinos,
 4096 flujos, 1000 eventos DNS y 500 alertas. Al llenarse se descartan los registros
-más antiguos. El mapa muestra hasta 40 nodos y 70 enlaces; la tabla permite ver más.
+más antiguos. El mapa muestra hasta 40 nodos unicast (excluye multicast/broadcast) y 70 enlaces; la tabla permite ver más.
 El filtro temporal selecciona flujos por última actividad; sus bytes son acumulados
 retenidos, no una tasa ni bytes exactos de ese intervalo. El informe JSON incluye
 IPs, MAC y dominios: compártelo sólo con quien deba conocer tu actividad de red.
@@ -130,18 +130,20 @@ los dispositivos. Tras un cambio, vuelve a auditar el mismo equipo y nombre DNS:
   no se interpreta como parche aplicado. Un cambio de MAC/subred o de nombre DNS
   inicia una comparación nueva.
 
-Se conserva en RAM el último informe de hasta 16 IP, con hasta 128 hallazgos por
-informe. Los informes y sus notas se borran con **Nueva sesión** o al cerrar el servidor;
-descarga el JSON si necesitas conservarlos. Las pruebas automáticas usan servicios
-de loopback y fallos simulados, sin auditar la LAN.
+Se conserva el último informe de hasta 16 IP (con hasta 128 hallazgos por informe) en
+memoria y en SQLite (`data/devices.sqlite3`, tabla `audits`), por lo que las auditorías
+y sus notas de remediación persisten entre reinicios. **Nueva sesión** limpia la vista
+en memoria; también puedes descargar cada informe en JSON. Las pruebas automáticas usan
+servicios de loopback y fallos simulados, sin auditar la LAN.
 
 Referencias de configuración: [HTTP Headers de OWASP](https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html)
 y [TLS de OWASP](https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html).
 
-Módulos nuevos: `security.py` (telemetría y tareas), `security_ui.py` (panel) y
-`managed_capture.py` (cierre de pipes/subprocesos de PyShark 0.6). El adaptador
-usa internals de PyShark: revisar sus pruebas antes de actualizar a otra serie.
-`device_registry.py` administra las etiquetas persistentes con SQLite.
+Módulos principales: `security.py` (telemetría y tareas), `security_ui.py` y `audit_ui.py`
+(paneles), `ui_theme.py` (paleta y estilo de gráficos) y `managed_capture.py` (cierre de
+pipes/subprocesos de PyShark 0.6). El adaptador usa internals de PyShark: revisar sus pruebas
+antes de actualizar a otra serie. `device_registry.py` administra las etiquetas y el historial
+de auditorías persistentes con SQLite.
 `test_security.py` verifica las reglas, límites, filtros de red, exportaciones y un
 socket TCP real de loopback; no escanea la LAN durante las pruebas.
 
@@ -149,12 +151,12 @@ socket TCP real de loopback; no escanea la LAN durante las pruebas.
 
 ```text
 TShark / dumpcap / Npcap
-  +-- IPv4/ARP ---> inventario / flujos / alertas ---> panel de seguridad
-  +-- hilo IP -----> proceso > DNS > puerto ---> agregador con RLock
-  +-- hilo DNS ---> caché A con TTL                    |
-psutil -----------> hilo procesos cada 2 s             v
-                                           Streamlit + Plotly
-                                           fragmento cada 2 s
+  +-- IPv4/IPv6/ARP -> inventario / flujos / alertas -> panel de seguridad
+  +-- hilo IP -------> proceso > DNS > puerto --------> agregador con RLock
+  +-- hilo DNS ------> caché A/AAAA con TTL                  |
+psutil --------------> hilo procesos cada 2 s                v
+                                                 Streamlit + Plotly
+                                                 fragmento cada 2 s
 ```
 
 Cada hilo de captura tiene su propio event loop. Detener solicita su cancelación
@@ -223,10 +225,12 @@ para evitar ambigüedades de nombres y cambios de índice.
 - Clasificación por conexión completa TCP/UDP; sockets sin remoto permiten fallback
   por IP/puerto local. El mapa de procesos se refresca cada 2 s: conexiones muy breves
   pueden clasificarse por dominio o puerto y no se reclasifican retroactivamente.
-- DNS observa respuestas A en UDP y TCP 53, incluidos múltiples registros, con TTL
+- DNS observa respuestas A y AAAA en UDP y TCP 53, incluidos múltiples registros, con TTL
   conservador. DNS cifrado/DoH no es visible; una IP compartida puede tener varios dominios.
-- IPv6 no se captura. La autodetección mide actividad de adaptadores durante 250 ms;
-  con VPN o adaptadores virtuales puede ser necesario seleccionar la interfaz manualmente.
+- Se captura tráfico IPv4 e IPv6 (el descubrimiento de subred y las comprobaciones activas
+  TCP/auditoría se acotan a subredes IPv4 privadas conectadas). La autodetección mide actividad
+  de adaptadores durante 250 ms; con VPN o adaptadores virtuales puede ser necesario seleccionar
+  la interfaz manualmente.
 
 ## Límites de memoria
 
@@ -238,7 +242,7 @@ perder paquetes: no es un sistema de contabilidad exacta ni un medidor a velocid
 
 ## Diagnóstico
 
-Pulsa **Comprobar / actualizar interfaces** tras instalar o reparar herramientas.
+Pulsa **Actualizar interfaces** tras instalar o reparar herramientas.
 
 - `Unable to load Npcap (wpcap.dll)`: instala/repara Npcap y reinicia si se solicita.
   El modo de compatibilidad WinPcap no es requisito general de Wireshark moderno.

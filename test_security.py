@@ -124,10 +124,18 @@ class SecurityTests(unittest.TestCase):
 
     def test_map_populated(self):
         self.engine.observe_packet('192.168.1.2','1.1.1.1',50000,443,'tcp',500)
+        self.engine.observe_packet('192.168.1.2','224.0.0.251',5353,5353,'udp',120)
+        self.engine.observe_packet('192.168.1.2','ff02::fb',5353,5353,'udp',120)
+        self.engine.observe_packet('192.168.1.2','192.168.1.255',137,137,'udp',90)
+        self.engine.observe_packet('192.168.1.2','255.255.255.255',68,67,'udp',90)
         snapshot = self.engine.snapshot()
         figure = network_figure(snapshot['connections'],snapshot['devices'])
         self.assertEqual(len(figure.data),4)
-        self.assertIn('192.168.1.2',str(figure.to_plotly_json()))
+        payload = str(figure.to_plotly_json())
+        self.assertIn('192.168.1.2', payload)
+        self.assertIn('1.1.1.1', payload)
+        for non_unicast in ('224.0.0.251', 'ff02::fb', '192.168.1.255', '255.255.255.255'):
+            self.assertNotIn(non_unicast, payload)
 
     def test_destination_and_neighbor_cache_do_not_confirm_presence(self):
         self.engine.observe_packet('192.168.1.2', '192.168.1.15', 50000, 443, 'tcp', 60)

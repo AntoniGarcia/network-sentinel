@@ -30,26 +30,70 @@ def frame(rows):
     return result
 
 
+def _is_non_unicast(ip, broadcasts, known_ips):
+    try:
+        addr = ipaddress.ip_address(str(ip).split("%")[0])
+    except ValueError:
+        return True
+    if addr.is_multicast or addr.is_unspecified:
+        return True
+    text = str(addr)
+    if text == "255.255.255.255" or text in broadcasts:
+        return True
+    if text not in known_ips and addr.version == 4 and addr.is_private and text.endswith(".255"):
+        return True
+    return False
+
+
 def network_figure(rows, devices):
+    kinds = {d["IP"]: d["Tipo"] for d in devices}
+    names = {d["IP"]: d.get("Nombre", "") for d in devices}
+    broadcasts = set()
+    for dev in devices:
+        subred = dev.get("Subred")
+        if subred:
+            try:
+                net = ipaddress.ip_network(subred, strict=False)
+                if net.version == 4:
+                    broadcasts.add(str(net.broadcast_address))
+            except ValueError:
+                pass
+
     totals = defaultdict(int)
     edges = defaultdict(int)
     for row in rows:
-        edges[(row["Origen"], row["Destino"])] += row["Bytes"]
-        totals[row["Origen"]] += row["Bytes"]
-        totals[row["Destino"]] += row["Bytes"]
+        src, dst = row["Origen"], row["Destino"]
+        if _is_non_unicast(src, broadcasts, kinds) or _is_non_unicast(dst, broadcasts, kinds):
+            continue
+        edges[(src, dst)] += row["Bytes"]
+        totals[src] += row["Bytes"]
+        totals[dst] += row["Bytes"]
 
-    kinds = {d["IP"]: d["Tipo"] for d in devices}
-    names = {d["IP"]: d.get("Nombre", "") for d in devices}
     chosen = sorted(totals, key=totals.get, reverse=True)[:40]
     if not chosen:
-        chosen = [d["IP"] for d in devices if d["Tipo"] != "Externo"][:40]
+        chosen = [
+            d["IP"]
+            for d in devices
+            if d["Tipo"] != "Externo" and not _is_non_unicast(d["IP"], broadcasts, kinds)
+        ][:40]
 
     positions = {}
-    lanes = [(-1, "Este equipo", "Este equipo"), (0, "LAN", "Red local (LAN)"), (1, "Externo", "Externo")]
-    for x, kind, _ in lanes:
-        members = sorted(ip for ip in chosen if kinds.get(ip, "Externo") == kind)
+    lanes = [
+        (-1, "Este equipo", "Este equipo", "middle left"),
+        (0, "LAN", "Red local (LAN)", "top center"),
+        (1, "Externo", "Externo", "middle right"),
+    ]
+    max_lane_nodes = 1
+    for x, kind, _, _ in lanes:
+        members = sorted(
+            (ip for ip in chosen if kinds.get(ip, "Externo") == kind),
+            key=lambda ip: (-totals[ip], ip),
+        )
+        max_lane_nodes = max(max_lane_nodes, len(members))
+        count = len(members)
         for i, ip in enumerate(members):
-            positions[ip] = (x, (i - (len(members) - 1) / 2) / max(len(members), 1) * 1.8)
+            y = 0.0 if count == 1 else 0.96 - (2 * 0.96 * i) / (count - 1)
+            positions[ip] = (x, y)
 
     fig = go.Figure()
 
@@ -58,15 +102,15 @@ def network_figure(rows, devices):
             type="line",
             x0=divider_x,
             x1=divider_x,
-            y0=-1.15,
-            y1=1.15,
+            y0=-1.08,
+            y1=1.08,
             line=dict(color="rgba(148, 163, 184, 0.14)", width=1, dash="dot"),
         )
 
-    for x, _, title in lanes:
+    for x, _, title, _ in lanes:
         fig.add_annotation(
             x=x,
-            y=1.18,
+            y=1.16,
             text=f"<b>{title}</b>",
             showarrow=False,
             font=dict(family=FONT_FAMILY, size=11, color=PALETTE["muted"]),
@@ -94,8 +138,8 @@ def network_figure(rows, devices):
                 y=[y1, y2],
                 mode="lines",
                 line=dict(
-                    color="rgba(96, 165, 250, 0.28)",
-                    width=min(4.5, 1 + math.log10(size + 1) / 2),
+                    color="rgba(96, 165, 250, 0.25)",
+                    width=min(4.0, 1 + math.log10(size + 1) / 2.2),
                 ),
                 text=[f"<b>{escape(src)} → {escape(dst)}</b><br>{size / 1024:.1f} KiB"] * 2,
                 hoverinfo="text",
@@ -108,6 +152,7 @@ def network_figure(rows, devices):
         "LAN": PALETTE["emerald"],
         "Externo": PALETTE["amber"],
     }
+    text_positions = {kind: pos for _, kind, _, pos in lanes}
     for kind, color in colors.items():
         ips = [ip for ip in positions if kinds.get(ip, "Externo") == kind]
         fig.add_trace(
@@ -115,14 +160,19 @@ def network_figure(rows, devices):
                 x=[positions[ip][0] for ip in ips],
                 y=[positions[ip][1] for ip in ips],
                 mode="markers+text",
-                text=[escape(names.get(ip) or ip) for ip in ips],
-                textposition="top center",
+                text=[
+                    f" {escape(names.get(ip) or ip)} "
+                    if text_positions[kind] != "top center"
+                    else escape(names.get(ip) or ip)
+                    for ip in ips
+                ],
+                textposition=text_positions[kind],
                 textfont=dict(family=FONT_FAMILY, size=11, color=PALETTE["text"]),
                 name=kind,
                 marker=dict(
-                    size=[12 + min(14, math.log10(totals[ip] + 1) * 2) for ip in ips],
+                    size=[10 + min(10, math.log10(totals[ip] + 1) * 1.6) for ip in ips],
                     color=color,
-                    line=dict(color=PALETTE["bg"], width=1.8),
+                    line=dict(color=PALETTE["bg"], width=1.6),
                 ),
                 hovertext=[
                     f"<b>{escape(names.get(ip) or ip)}</b><br>"
@@ -135,16 +185,17 @@ def network_figure(rows, devices):
             )
         )
 
+    chart_height = max(430, min(760, 110 + max_lane_nodes * 32))
     return apply_chart_layout(
         fig,
-        height=430,
-        margin=dict(l=20, r=20, t=24, b=16),
-        xaxis=dict(visible=False, range=[-1.35, 1.35]),
-        yaxis=dict(visible=False, range=[-1.2, 1.3]),
+        height=chart_height,
+        margin=dict(l=24, r=24, t=24, b=20),
+        xaxis=dict(visible=False, range=[-1.68, 1.68]),
+        yaxis=dict(visible=False, range=[-1.12, 1.24]),
         legend=dict(
             orientation="h",
             yanchor="bottom",
-            y=-0.06,
+            y=-0.05,
             xanchor="center",
             x=0.5,
             font=dict(color=PALETTE["muted"], size=12),
@@ -342,7 +393,7 @@ def render_security(monitor):
         with st.container(border=True):
             st.markdown("**:material/hub: Topología de comunicaciones observadas**")
             st.caption(
-                "Hasta 40 nodos y 70 enlaces · el grosor refleja bytes retenidos. "
+                "Hasta 40 nodos unicast y 70 enlaces (excluye multicast/broadcast) · el grosor refleja bytes retenidos. "
                 "El periodo filtra por última actividad; los bytes por flujo son acumulados."
             )
             st.plotly_chart(
